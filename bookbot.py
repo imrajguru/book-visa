@@ -1,29 +1,27 @@
-import requests
-from bs4 import BeautifulSoup
 import time
 import random
-import os
+from selenium import webdriver
+from selenium.webdriver.common.by import By
+from selenium.webdriver.chrome.service import Service
+from webdriver_manager.chrome import ChromeDriverManager
 from twilio.rest import Client
+import os
 
 # ================= CONFIG =================
 URL = "https://checkvisaslots.com/latest-us-visa-availability/f-1-regular/"
 
-# Twilio
 ACCOUNT_SID = os.getenv("ACCOUNT_SID")
 AUTH_TOKEN = os.getenv("AUTH_TOKEN")
 TWILIO_NUMBER = os.getenv("TWILIO_NUMBER")
 YOUR_NUMBER = os.getenv("YOUR_NUMBER")
 
-# ==========================================
-
 client = Client(ACCOUNT_SID, AUTH_TOKEN)
 
-# Prevent spam alerts
+# Cooldown
 last_alert_time = 0
-ALERT_COOLDOWN = 600  # 10 minutes
+ALERT_COOLDOWN = 600  # 10 min
 
-
-# ---------- SMS ----------
+# ---------- ALERTS ----------
 def send_sms(msg):
     client.messages.create(
         body=msg,
@@ -32,42 +30,51 @@ def send_sms(msg):
     )
     print("📱 SMS sent")
 
-
-# ---------- CALL ----------
 def make_call():
     client.calls.create(
-        twiml='<Response><Say>Alert! Mumbai visa slot is available. Check immediately.</Say></Response>',
+        twiml='<Response><Say>Mumbai visa slot update detected. Check immediately.</Say></Response>',
         to=YOUR_NUMBER,
         from_=TWILIO_NUMBER
     )
     print("📞 Calling...")
 
+# ---------- SETUP SELENIUM ----------
+options = webdriver.ChromeOptions()
+options.add_argument("--headless")
+options.add_argument("--no-sandbox")
+options.add_argument("--disable-dev-shm-usage")
 
-# ---------- EXTRACT MUMBAI DATA ----------
+driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
+
+# ---------- EXTRACT MUMBAI VAC ----------
 def extract_mumbai_data():
-    response = requests.get(URL)
-    soup = BeautifulSoup(response.text, "html.parser")
+    driver.get(URL)
+    time.sleep(5)  # wait for JS to load
 
-    rows = soup.find_all("tr")
+    rows = driver.find_elements(By.TAG_NAME, "tr")
 
     for row in rows:
-        cols = [c.text.strip() for c in row.find_all("td")]
+        cols = row.find_elements(By.TAG_NAME, "td")
+        cols = [c.text.strip() for c in cols]
 
-        if len(cols) > 0 and "mumbai" in cols[0].lower():
-            try:
-                total_dates = int(cols[4]) if cols[4].isdigit() else 0
-            except:
-                total_dates = 0
+        if len(cols) > 0:
+            location = cols[0].lower()
 
-            return {
-                "location": cols[0],
-                "earliest_date": cols[2],
-                "total_dates": total_dates,
-                "last_seen": cols[5]
-            }
+            # 🎯 STRICT MATCH
+            if location == "mumbai vac":
+                try:
+                    total_dates = int(cols[4]) if cols[4].isdigit() else 0
+                except:
+                    total_dates = 0
+
+                return {
+                    "location": cols[0],
+                    "earliest_date": cols[2],
+                    "total_dates": total_dates,
+                    "last_seen": cols[5]
+                }
 
     return None
-
 
 # ---------- MAIN LOOP ----------
 previous_data = None
@@ -79,45 +86,40 @@ while True:
         current_data = extract_mumbai_data()
 
         if current_data:
-            print("📊 Current Data:", current_data)
+            print("📊 Current:", current_data)
 
             if previous_data:
                 trigger = None
 
-                # 🔥 1. Earliest date changed
+                # 🔥 Detect changes
                 if current_data["earliest_date"] != previous_data["earliest_date"]:
-                    trigger = f"📅 New slot date: {current_data['earliest_date']}"
+                    trigger = f"📅 New date: {current_data['earliest_date']}"
 
-                # 🔥 2. More slots added
                 elif current_data["total_dates"] > previous_data["total_dates"]:
                     trigger = f"📈 Slots increased: {current_data['total_dates']}"
 
-                # 🔥 3. Fresh update detected
                 elif current_data["last_seen"] != previous_data["last_seen"]:
                     trigger = "⚡ Fresh update detected!"
 
-                # ---------- ALERT ----------
                 if trigger:
                     if time.time() - last_alert_time > ALERT_COOLDOWN:
-                        message = f"🚨 {trigger}\nMumbai VAC slots updated!\nCheck immediately!"
+                        msg = f"🚨 {trigger}\nMumbai VAC updated! Check now!"
+                        print(msg)
 
-                        print("🚨 ALERT:", message)
-
-                        send_sms(message)
+                        send_sms(msg)
                         make_call()
 
                         last_alert_time = time.time()
                     else:
-                        print("⏳ Cooldown active, skipping alert")
+                        print("⏳ Cooldown active")
 
             previous_data = current_data
 
         else:
-            print("❌ Mumbai data not found")
+            print("❌ Mumbai VAC not found")
 
-        # Random delay to stay safe
         sleep_time = random.randint(120, 240)
-        print(f"⏳ Sleeping {sleep_time} seconds...")
+        print(f"⏳ Sleeping {sleep_time} sec")
         time.sleep(sleep_time)
 
     except Exception as e:
